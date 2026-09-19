@@ -1,9 +1,9 @@
 # -*- mode: ruby -*-
 
 
-POD_VERSION = 0
+POD_VERSION = 1
 
-GITHUB_URL  = "https://github.com/xord/cruby"
+GITHUB_URL  = "https://github.com/arcticleo/cruby"
 
 RUBY_URL    = 'https://cache.ruby-lang.org/pub/ruby/4.0/ruby-4.0.6.tar.gz'
 RUBY_SHA256 = '837d299e8f7ddf2be31a229a7a7e019d354979825117989acb3b32b1a9be262a'
@@ -13,6 +13,9 @@ OSSL_SHA256 = '243a86649cf6f23eeb6a2ff2456e09e5d77dd9018a54d3d96b0c6bdd6ba6c7f1'
 
 YAML_URL    = 'https://github.com/yaml/libyaml/releases/download/0.2.5/yaml-0.2.5.tar.gz'
 YAML_SHA256 = 'c642ae9b75fee120b2d96c712538bd2cf283228d2337df2cf2988e3c02678ef4'
+
+FFI_URL     = 'https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz'
+FFI_SHA256  = '7da3e2d9a171eb0a038f592ecad3ff2bb2550f3496d87b3b29ad0cf4430c0db4'
 
 
 module CRuby

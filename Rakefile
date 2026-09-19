@@ -85,8 +85,8 @@ end
 NAME = "CRuby"
 
 TARGETS = [
-  [:macos, :macosx,          [:arm64, :x86_64]],
-  [:ios,   :iphonesimulator, [:arm64, :x86_64]],
+  [:macos, :macosx,          [:arm64]],
+  [:ios,   :iphonesimulator, [:arm64]],
   [:ios,   :iphoneos,        [:arm64]]
 ].each {|os, sdk, archs|
   archs.reject! {|arch|
@@ -94,23 +94,34 @@ TARGETS = [
   }
 }.reject {|os, sdk, archs| BUILD_OS && os.to_s != BUILD_OS || archs.empty?}
 
+# Deployment targets. Every slice is built against these so the linker
+# never warns about objects built for a newer OS than the app.
+MIN_VERSION_FLAGS = {
+  macosx:          '-mmacosx-version-min=14.0',
+  iphonesimulator: '-mios-simulator-version-min=17.0',
+  iphoneos:        '-miphoneos-version-min=17.0'
+}
+
 ROOT_DIR   = __dir__
 INC_DIR    = "#{ROOT_DIR}/include"
 RUBY_DIR   = "#{ROOT_DIR}/.ruby"
 GEMS_DIR   = "#{ROOT_DIR}/.gems"
 OSSL_DIR   = "#{ROOT_DIR}/.openssl"
 YAML_DIR   = "#{ROOT_DIR}/.libyaml"
+FFI_DIR    = "#{ROOT_DIR}/.libffi"
 BUILD_DIR  = "#{ROOT_DIR}/.build"
 OUTPUT_DIR = "#{ROOT_DIR}/#{NAME}"
 
 RUBY_ARCHIVE = "#{ROOT_DIR}/#{File.basename RUBY_URL}"
 OSSL_ARCHIVE = "#{ROOT_DIR}/#{File.basename OSSL_URL}"
 YAML_ARCHIVE = "#{ROOT_DIR}/#{File.basename YAML_URL}"
+FFI_ARCHIVE  = "#{ROOT_DIR}/#{File.basename FFI_URL}"
 
 RUBY_CONFIGURE   = "#{RUBY_DIR}/configure"
 OSSL_CONFIGURE   = "#{OSSL_DIR}/Configure"
 OSSL_CUSTOM_CONF = "#{OSSL_DIR}/Configurations/999-custom.conf"
 YAML_CONFIGURE   = "#{YAML_DIR}/configure"
+FFI_CONFIGURE    = "#{FFI_DIR}/configure"
 
 HEADERS_PATCH         = "#{ROOT_DIR}/headers.patch"
 HEADERS_PATCH_DEV_DIR = "#{ROOT_DIR}/.headers"
@@ -131,6 +142,7 @@ OUTPUT_XCFRAMEWORK_INFO_PLIST = "#{OUTPUT_XCFRAMEWORK_DIR}/Info.plist"
 
 OUTPUT_INC_DIR = "#{OUTPUT_DIR}/include"
 OUTPUT_RUBY_H  = "#{OUTPUT_INC_DIR}/ruby.h"
+OUTPUT_FFI_H   = "#{OUTPUT_INC_DIR}/ffi/ffi.h"
 
 OUTPUT_LIB_DIR          = "#{OUTPUT_DIR}/lib/ruby"
 OUTPUT_LIB_DATA_DIR     = "#{OUTPUT_LIB_DIR}/data"
@@ -159,7 +171,7 @@ task :clobber => [:clean, 'test:clobber'] do
 end
 
 desc "build"
-task :build => [OUTPUT_XCFRAMEWORK_INFO_PLIST, OUTPUT_RUBY_H, OUTPUT_RBCONFIG_RB]
+task :build => [OUTPUT_XCFRAMEWORK_INFO_PLIST, OUTPUT_RUBY_H, OUTPUT_FFI_H, OUTPUT_RBCONFIG_RB]
 
 desc "test"
 task :test => 'test:test'
@@ -175,7 +187,8 @@ directory OUTPUT_LIB_RBCONFIG_DIR
 [
   [RUBY_DIR, RUBY_URL, RUBY_SHA256, RUBY_ARCHIVE, RUBY_CONFIGURE],
   [OSSL_DIR, OSSL_URL, OSSL_SHA256, OSSL_ARCHIVE, OSSL_CONFIGURE],
-  [YAML_DIR, YAML_URL, YAML_SHA256, YAML_ARCHIVE, YAML_CONFIGURE]
+  [YAML_DIR, YAML_URL, YAML_SHA256, YAML_ARCHIVE, YAML_CONFIGURE],
+  [FFI_DIR,  FFI_URL,  FFI_SHA256,  FFI_ARCHIVE,  FFI_CONFIGURE]
 ].each do |dir, url, sha256, archive, configure|
   task :clobber do
     sh %( rm -rf #{archive} #{dir} )
@@ -200,13 +213,14 @@ file RUBY_CONFIGURE do
     s + <<~EOS
       // Mimics ruby_opt_init() (and the surrounding process_options() path)
       // for embedding; keep the call order in sync with ruby.c on version ups.
-      void CRuby_init (bool yjit)
+      void CRuby_init_ex (bool yjit, bool gems)
       {
         RUBY_INIT_STACK;
         ruby_init();
 
         ruby_cmdline_options_t opt;
         cmdline_options_init(&opt);
+        if (!gems) FEATURE_SET_TO(opt.features, FEATURE_BIT(gems), 0);
 
         #if USE_YJIT
           FEATURE_SET(opt.features, FEATURE_BIT(yjit));
@@ -280,6 +294,11 @@ file RUBY_CONFIGURE do
         #endif
 
         rb_stdio_set_default_encoding();
+      }
+
+      void CRuby_init (bool yjit)
+      {
+        CRuby_init_ex(yjit, true);
       }
     EOS
   end
@@ -371,9 +390,13 @@ file RUBY_CONFIGURE => GEMS_TOUCH do
         .gsub(/gem_(pm_[a-z_]+)\.h/) {"#{$1}.h"}
     end
   end
-  modify_file "#{RUBY_DIR}/prism_init.c" do |src|
-    # avoid duplicate registration of 'prism/prism.so'
-    src.sub /^.*prism\/prism\.so.*$/, ''
+  # only when a gem copy of prism was unpacked into ext/ above; otherwise the
+  # built-in registration is the only one and must stay
+  if Dir.glob("#{RUBY_DIR}/ext/prism-*").any?
+    modify_file "#{RUBY_DIR}/prism_init.c" do |src|
+      # avoid duplicate registration of 'prism/prism.so'
+      src.sub /^.*prism\/prism\.so.*$/, ''
+    end
   end
 end
 
@@ -389,24 +412,24 @@ file OSSL_CUSTOM_CONF do
     my %targets = (
       "macosx-x86_64" => {
         inherit_from => ["darwin64-x86_64-cc"],
-        cflags       => add("-isysroot #{sdk_path[:macosx]}"),
+        cflags       => add("-isysroot #{sdk_path[:macosx]} #{MIN_VERSION_FLAGS[:macosx]}"),
       },
       "macosx-arm64" => {
         inherit_from => ["darwin64-arm64-cc"],
-        cflags       => add("-isysroot #{sdk_path[:macosx]}"),
+        cflags       => add("-isysroot #{sdk_path[:macosx]} #{MIN_VERSION_FLAGS[:macosx]}"),
       },
       "iphonesimulator-x86_64" => {
         inherit_from => ["ios-common"],
-        cflags       => add("-isysroot #{sdk_path[:iphonesimulator]} -arch x86_64 -fno-common"),
+        cflags       => add("-isysroot #{sdk_path[:iphonesimulator]} -arch x86_64 -fno-common #{MIN_VERSION_FLAGS[:iphonesimulator]}"),
       },
       "iphonesimulator-arm64" => {
         inherit_from => ["ios-common"],
-        cflags       => add("-isysroot #{sdk_path[:iphonesimulator]} -arch arm64 -fno-common"),
+        cflags       => add("-isysroot #{sdk_path[:iphonesimulator]} -arch arm64 -fno-common #{MIN_VERSION_FLAGS[:iphonesimulator]}"),
       },
       "iphoneos-arm64" => {
         inherit_from => ["ios64-xcrun"],
         CC           => "cc",
-        cflags       => add("-isysroot #{sdk_path[:iphoneos]}"),
+        cflags       => add("-isysroot #{sdk_path[:iphoneos]} #{MIN_VERSION_FLAGS[:iphoneos]}"),
       },
     );
   END
@@ -494,11 +517,14 @@ TARGETS.each do |os, sdk, archs|
     yaml_dir         = "#{build_arch_dir}/libyaml"
     ossl_install_dir = "#{build_arch_dir}/openssl-install"
     yaml_install_dir = "#{build_arch_dir}/libyaml-install"
+    ffi_dir          = "#{build_arch_dir}/libffi"
+    ffi_install_dir  = "#{build_arch_dir}/libffi-install"
 
     libruby_ver = ".#{CRuby.ruby_version[0, 2].join '.'}"
     libruby     = "#{ruby_dir}/libruby#{libruby_ver}-static.a"
     libossl     = "#{ossl_install_dir}/lib/libssl.a"
     libyaml     = "#{yaml_install_dir}/lib/libyaml.a"
+    libffi      = "#{ffi_install_dir}/lib/libffi.a"
 
     rbconfig_rb = "#{OUTPUT_LIB_RBCONFIG_DIR}/rbconfig-#{sdk}-#{arch}.rb"
 
@@ -508,12 +534,17 @@ TARGETS.each do |os, sdk, archs|
     arm  = arch =~ /^arm/
     host = "#{arm ? 'arm' : arch}-#{ios ? 'iphone' : 'apple'}-darwin"
 
+    # libffi's configure keys its Apple trampoline-table mode (no runtime code
+    # generation) off "aarch64-apple-*", so it gets a canonical triple.
+    ffi_host    = "#{arm ? 'aarch64' : arch}-apple-darwin"
+    min_version = MIN_VERSION_FLAGS[sdk]
+
     namespace :ruby do
       config_h     = "#{OUTPUT_INC_DIR}/ruby/config-#{sdk}-#{arch}.h"
       config_h_dir = File.dirname config_h
       makefile     = "#{ruby_dir}/Makefile"
       isysroot     = "-isysroot #{sdk_root}"
-      flags        = "-pipe -Os #{isysroot}" # -gdwarf-2 -no-cpp-precomp -mthumb
+      flags        = "-pipe -Os #{isysroot} #{min_version}" # -gdwarf-2 -no-cpp-precomp -mthumb
 
       if "#{sdk}:#{arch}" == 'iphonesimulator:x86_64'
         flags << " -miphoneos-version-min=10.0"
@@ -546,7 +577,7 @@ TARGETS.each do |os, sdk, archs|
         flags           += " -I#{ruby_inc_dir}"
       end
 
-      makefile_dep = [RUBY_CONFIGURE, ruby_dir, libossl, libyaml, *missing_headers]
+      makefile_dep = [RUBY_CONFIGURE, ruby_dir, libossl, libyaml, libffi, *missing_headers]
       makefile_dep << BASE_RUBY if BASE_RUBY
       file makefile => makefile_dep do
         chdir ruby_dir do
@@ -578,6 +609,7 @@ TARGETS.each do |os, sdk, archs|
             --with-static-linked-ext
             --with-openssl-dir=#{ossl_install_dir}
             --with-libyaml-dir=#{yaml_install_dir}
+            --with-libffi-dir=#{ffi_install_dir}
           ]
           opts += enables.map  {|s| "--enable-#{s}"}
           opts += disables.map {|s| "--disable-#{s}"}
@@ -638,7 +670,7 @@ TARGETS.each do |os, sdk, archs|
       file libyaml => [YAML_CONFIGURE, yaml_dir] do
         chdir yaml_dir do
           envs = {
-            CC: "xcrun --sdk #{sdk} cc -arch #{arch}"
+            CC: "xcrun --sdk #{sdk} cc -arch #{arch} #{min_version}"
           }.map {|k, v| "#{k}='#{v}'"}.join ' '
           opts = %W[
             --prefix=#{yaml_install_dir}
@@ -653,6 +685,37 @@ TARGETS.each do |os, sdk, archs|
       end
     end# libyaml
 
+    namespace :libffi do
+      directory ffi_dir
+      directory ffi_install_dir
+
+      file libffi => [FFI_CONFIGURE, ffi_dir] do
+        chdir ffi_dir do
+          envs = {
+            CC:     "xcrun --sdk #{sdk} cc -arch #{arch} #{min_version}",
+            CFLAGS: "-Os"
+          }.map {|k, v| "#{k}='#{v}'"}.join ' '
+          opts = %W[
+            --prefix=#{ffi_install_dir}
+            --host=#{ffi_host}
+            --enable-static
+            --disable-shared
+            --disable-docs
+            --disable-multi-os-directory
+          ].join ' '
+          sh %( #{envs} #{FFI_CONFIGURE} #{opts} )
+          sh %( #{envs} make -j -s )
+          sh %( make install )
+        end
+      end
+
+      # every slice is arm64, so one copy of the headers serves them all
+      file OUTPUT_FFI_H => [libffi, OUTPUT_INC_DIR] do
+        sh %( mkdir -p #{File.dirname OUTPUT_FFI_H} )
+        sh %( cp #{ffi_install_dir}/include/ffi.h #{ffi_install_dir}/include/ffitarget.h #{File.dirname OUTPUT_FFI_H}/ )
+      end
+    end# libffi
+
     file rbconfig_rb => [libruby, OUTPUT_LIB_RBCONFIG_DIR] do
       sh %( cp "#{ruby_dir}/rbconfig.rb" #{rbconfig_rb} )
       modify_file rbconfig_rb do |s|
@@ -661,12 +724,12 @@ TARGETS.each do |os, sdk, archs|
       end
     end
 
-    file arch_lib_file => [libruby, libossl, libyaml] do
+    file arch_lib_file => [libruby, libossl, libyaml, libffi] do
       extract_dir = "#{build_arch_dir}/.#{File.basename arch_lib_file}"
       excludes    = %w[dmyenc.o dmyext.o]
       extra_objs  = %w[enc ext].map {|s| "#{ruby_dir}/#{s}/#{s}init.o"}
 
-      [ruby_dir, ossl_install_dir, yaml_install_dir]
+      [ruby_dir, ossl_install_dir, yaml_install_dir, ffi_install_dir]
         .map {|dir| Dir.glob "#{dir}/**/*.a"}
         .flatten
         .reject {|path| excludes.any? {|s| path.include? s}}
