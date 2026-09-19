@@ -14,3 +14,5 @@
 /test/macos/*/Info.plist
 
 .DS_Store
+/.libffi
+/libffi-*.tar.gz
