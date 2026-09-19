@@ -590,6 +590,9 @@ TARGETS.each do |os, sdk, archs|
           withouts = %w[bigdecimal readline]
           withouts << 'fiddle' if ios # to pass the App Store review
           nofuncs  = %w[backtrace system syscall __syscall getentropy dup3 pipe2]
+          # dup3/pipe2 appeared in the macOS 27 SDK; a slice built here must
+          # still link on machines with an older SDK (CI runners, other Macs)
+          macos_nofuncs = %w[dup3 pipe2]
 
           envs = {
             PATH:     "#{cc_dir}:#{PATHS}",
@@ -616,6 +619,7 @@ TARGETS.each do |os, sdk, archs|
           opts += withouts.map {|s| "--without-#{s}"}
           opts << "--with-out-ext=#{withouts.map {|s| "#{s}*"}.join ','}"
           opts += nofuncs .map {|s| "ac_cv_func_#{s}=no"} if ios
+          opts += macos_nofuncs.map {|s| "ac_cv_func_#{s}=no"} unless ios
           opts << "--with-arch=#{arch}" unless arm
           opts << "--with-baseruby=#{BASE_RUBY}" if BASE_RUBY
 
